@@ -319,6 +319,7 @@ def cloud_scheduler_loop(query_manager=None):
     # import scheduler_func.pid_mogai_scheduler
     # import scheduler_func.pid_content_aware_scheduler
     import scheduler_func.lat_first_pid
+    import scheduler_func.lat_first_pid_resource_runtime
 
 
     while True:
@@ -350,10 +351,11 @@ def cloud_scheduler_loop(query_manager=None):
                 runtime_info = r.json()
                 # 更新查询的运行时情境（以便用户从云端获取）
                 if runtime_info:
-                    query.set_runtime(runtime_info=runtime_info)
+                    query.set_runtime(runtime_info=runtime_info)  # 每调度一次更新一次云端Query中的runtime
 
                 # conf, flow_mapping = scheduler_func.pid_mogai_scheduler.scheduler(
                 # conf, flow_mapping = scheduler_func.pid_content_aware_scheduler.scheduler(
+
                 conf, flow_mapping = scheduler_func.lat_first_pid.scheduler(
                     # flow=job.get_dag_flow(),
                     job_uid=query_id,
@@ -364,11 +366,29 @@ def cloud_scheduler_loop(query_manager=None):
                     user_constraint=user_constraint
                 )
 
+                '''
+                conf, flow_mapping, resource_alloc = scheduler_func.lat_first_pid_resource_runtime.scheduler(
+                    # flow=job.get_dag_flow(),
+                    job_uid=query_id,
+                    dag={"generator": "x", "flow": query.pipeline},
+                    resource_info=resource_info,
+                    runtime_info=runtime_info,
+                    # last_plan_res=last_plan_result,
+                    user_constraint=user_constraint
+                )
+                '''
                 # 更新查询策略（以便用户从云端获取）
                 query.set_plan(video_conf=conf, flow_mapping=flow_mapping)
                 # 主动post策略到对应节点（即更新对应视频流query pipeline的执行策略），让节点代理执行，不等待执行结果
+
                 r = query_manager.sess.post(url="http://{}/job/update_plan".format(node_addr),
                             json={"job_uid": query_id, "video_conf": conf, "flow_mapping": flow_mapping})
+
+                '''
+                r = query_manager.sess.post(url="http://{}/job/update_plan".format(node_addr),
+                                            json={"job_uid": query_id, "video_conf": conf,
+                                                  "flow_mapping": flow_mapping, "resource_alloc": resource_alloc})
+                '''
         # except AssertionError as e:
         #     root_logger.error("caught assertion, msg={}".format(e), exc_info=True)
         except Exception as e:

@@ -344,6 +344,7 @@ class Job():
             frame_result = dict()  # 只保存视频帧在DAG最后一步的结果，不保留中间任务的结果
             plan_result = dict()
             plan_result['delay'] = dict()  # 保存DAG中每一步执行的时延
+            runtime_dict = dict()
             for taskname in self.pipeline:
 
                 root_logger.info("to forward taskname={}".format(taskname))
@@ -377,6 +378,11 @@ class Job():
                 # wrapped_ctx = output_ctx.copy()
                 # wrapped_ctx['delay'] = (ed_time - st_time) / ((cam_frame_id - curr_cam_frame_id + 1) * 1.0)
                 # self.update_runtime(taskname=taskname, output_ctx=wrapped_ctx)
+                output_ctx['proc_resource_info']['all_latency'] = ed_time - st_time  # 单位：秒(s)，任务实际执行时延+数据传输时延
+                output_ctx['proc_resource_info']['device_ip'] = choice["node_ip"]  # 将当前任务执行的节点也报告给运行时情境
+                output_ctx['task_conf'] = self.video_conf  # 将当前任务的可配置参数也报告给运行时情境
+
+                runtime_dict[taskname] = output_ctx
                 self.update_runtime(taskname=taskname, output_ctx=output_ctx)  # 将DAG每一步的结果都汇报给运行时情境并更新情境
 
             n += 1
@@ -388,6 +394,11 @@ class Job():
                 total_frame_delay += plan_result['delay'][taskname]
 
             self.update_runtime(taskname='end_pipe', output_ctx={"delay": total_frame_delay})  # 将DAG执行的总时延也作为情境汇报
+
+            # DAG执行结束之后再次更新运行时情境，主要用于运行时情境画像，为知识库建立提供数据
+            runtime_dict['user_constraint'] = self.user_constraint
+            self.update_runtime(taskname='runtime_portrait', output_ctx=runtime_dict)
+
             output_ctx["frame_id"] = cam_frame_id
             output_ctx["n_loop"] = n
             output_ctx["delay"] = total_frame_delay
@@ -456,7 +467,7 @@ def job_submit_job_cbk():
                            node_addr=para['node_addr'],
                            video_id=para['video_id'],
                            pipeline=para['pipeline'],
-                           user_constraint=['user_constraint'])
+                           user_constraint=para['user_constraint'])
     return flask.jsonify({"status": 0,
                           "msg": "submitted to manager from api: node/submit_job",
                           "job_uid": para["job_uid"]})

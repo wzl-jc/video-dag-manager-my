@@ -14,31 +14,39 @@ if __name__ == "__main__":
     # expr_name = 'rack-pure-cloud-cpu-golden'
     # expr_name = 'tx2-pure-edge-gpu-golden'
     # expr_name = 'rack-pure-cloud-gpu-golden'
-    expr_name = 'test-can'
+    # expr_name = 'tx2-pure-edge-cpu-golden'
+    # expr_name = 'desktop-only-kp1-ki02-kd015'
+    # expr_name = 'output-scatter'
+    expr_name = 'cpu'
 
     # 提交请求
-    # node_addr = "127.0.0.1:5001"  # 边缘节点ip
+    # node_addr = "127.0.0.1:5001"
+    # node_addr = "172.27.147.22:5001"
+    # node_addr = "172.27.134.58:5001"
     node_addr = "172.27.152.177:5001"
     # node_addr = "114.212.81.11:5001"
+
     query_body = {
         "node_addr": node_addr,
-        "video_id": 1,
-        "pipeline": ["face_detection", "face_alignment"],
+        "video_id": 3,
+        "pipeline": ["car_detection"],
         "user_constraint": {
-            "delay": 0.3,
+            "delay": 0.2,
             "accuracy": 0.8
         }
     }
 
+
     # query_addr = "192.168.56.102:5000"
     query_addr = "114.212.81.11:5000"
+    # query_addr = "172.27.134.58:5000"
+    # query_addr = "127.0.0.1:5000"
     # query_addr = "172.27.152.177:5000"
     r = sess.post(url="http://{}/query/submit_query".format(query_addr),
                   json=query_body)
-    
+
     resp = r.json()
     query_id = resp["query_id"]
-    
 
     filename = datetime.datetime.now().strftime('%Y%m%d_%H_%M_%S') + \
         '_' + os.path.basename(__file__).split('.')[0] + \
@@ -46,9 +54,10 @@ if __name__ == "__main__":
         '_' + str(query_body['user_constraint']['accuracy']) + \
         '_' + expr_name + \
         '.csv'
-    
+
     with open(filename, 'w', newline='') as fp:
-        fieldnames = ['n_loop', 'frame_id', 'total', 'up', 'fps', 'resolution', 'delay', 'face_detection', 'face_alignment']
+        fieldnames = ['n_loop', 'frame_id', 'fps',
+                      'resolution', 'delay', 'car_detection']
         wtr = csv.DictWriter(fp, fieldnames=fieldnames)
         wtr.writeheader()
 
@@ -60,53 +69,52 @@ if __name__ == "__main__":
             try:
                 time.sleep(1)
                 print("post one query request")
-                r = sess.get(url="http://{}/query/get_result/{}".format(query_addr, query_id))
+                r = sess.get(
+                    url="http://{}/query/get_result/{}".format(query_addr, query_id))
                 if not r.json():
                     continue
                 resp = r.json()
 
-                # if 'appended_result' not in resp:
-                #     continue
                 res_list = resp['appended_result']
-                # if 'plan' not in resp['latest_result']:
-                #     continue
                 plan = resp['latest_result']['plan']
-                # if 'plan_result' not in resp['latest_result']:
-                #     continue
-                plan_result = resp['latest_result']['plan_result']
+                # plan_result = resp['latest_result']['plan_result']
+                # plan_result = resp['latest_result'].get('plan_result')
+                # runtime = resp['latest_result'].get('runtime')
 
-                # if 'video_conf' not in plan:
-                #     continue
+                # if runtime is not None:
+                #     delay = runtime.get('delay')
+                # else:
+                #     delay = 0.0
+
                 fps = plan['video_conf']['fps']
                 resolution = plan['video_conf']['resolution']
-                delay = sum(plan_result['delay'].values())
+                # if plan_result is not None:
+                #     delay = sum(plan_result['delay'].values())
+                # else:
+                #     delay = 0.0
 
-                # if 'flow_mapping' not in plan:
-                #     continue
-                fd_role = plan['flow_mapping']['face_detection']['node_role']
-                fa_role = plan['flow_mapping']['face_alignment']['node_role']
+                fd_role = plan['flow_mapping']['car_detection']['node_role']
 
                 for res in res_list:
-                    n_loop, frame_id, total, up = res['n_loop'], res['frame_id'], res['count_result']['total'], res['count_result']['up']
+                    n_loop, frame_id, delay = res['n_loop'], res['frame_id'], res['delay']
                     row = {
                         'n_loop': n_loop,
                         'frame_id': frame_id,
-                        'total': total,
-                        'up': up,
                         'fps': fps,
                         'resolution': resolution,
                         'delay': delay,
-                        'face_detection': fd_role,
-                        'face_alignment': fa_role
+                        'car_detection': fd_role,
                     }
                     if n_loop not in written_n_loop:
                         wtr.writerow(row)
                         written_n_loop[n_loop] = 1
-                    
-                print("written one query response, len written_n_loop={}".format(len(written_n_loop.keys())))
+
+                print("written one query response, len written_n_loop={}".format(
+                    len(written_n_loop.keys())))
 
             except Exception as e:
                 if r:
                     print("got serv result: {}".format(r.text))
-                print("caught exception: {}".format(e), exc_info=True)
+                # print("caught exception: {}".format(e), exc_info=True)
+                print("caught exception: {}".format(e))
                 break
