@@ -1,5 +1,6 @@
 import cv2
-import numpy
+import numpy as np
+import math
 import flask
 import flask.logging
 import flask_cors
@@ -18,6 +19,7 @@ from logging_utils import root_logger
 import logging_utils
 
 class Query():
+    CONTENT_ELE_MAXN = 50
 
     def __init__(self, query_id, node_addr, video_id, pipeline, user_constraint):
         self.query_id = query_id
@@ -33,7 +35,9 @@ class Query():
         # 查询指令结果
         self.result = None
         # 查询指令运行时情境
-        self.current_runtime = dict
+        self.current_runtime = dict()
+        self.runtime_pkg_list = dict()
+        self.runtime_info_list = dict()  # key为任务名，value为列表
 
     # ---------------------------------------
     # ---- 属性 ----
@@ -45,11 +49,178 @@ class Query():
 
     def get_plan(self):
         return {"video_conf": self.video_conf, "flow_mapping": self.flow_mapping}
+
+    def update_runtime(self, runtime_info):
+        for taskname in runtime_info:
+            if taskname == 'end_pipe':
+                if 'delay' not in self.runtime_pkg_list:
+                    self.runtime_pkg_list['delay'] = list()
+
+                if len(self.runtime_pkg_list['delay']) > Query.CONTENT_ELE_MAXN:
+                    del self.runtime_pkg_list['delay'][0]
+                self.runtime_pkg_list['delay'].append(runtime_info[taskname]['delay'])
+
+            # 对face_detection的结果，提取运行时情境
+            # TODO：目标数量、目标大小、目标速度
+            if taskname == 'face_detection':
+                # 定义运行时情境字段
+                if 'obj_n' not in self.runtime_pkg_list:
+                    self.runtime_pkg_list['obj_n'] = list()
+                if 'obj_size' not in self.runtime_pkg_list:
+                    self.runtime_pkg_list['obj_size'] = list()
+
+                # 更新各字段序列（防止爆内存）
+                if len(self.runtime_pkg_list['obj_n']) > Query.CONTENT_ELE_MAXN:
+                    del self.runtime_pkg_list['obj_n'][0]
+                self.runtime_pkg_list['obj_n'].append(len(runtime_info[taskname]['faces']))
+
+                obj_size = 0
+                for x_min, y_min, x_max, y_max in runtime_info[taskname]['bbox']:
+                    # TODO：需要依据分辨率转化
+                    obj_size += (x_max - x_min) * (y_max - y_min)
+                obj_size /= len(runtime_info[taskname]['bbox'])
+
+                if len(self.runtime_pkg_list['obj_size']) > Query.CONTENT_ELE_MAXN:
+                    del self.runtime_pkg_list['obj_size'][0]
+                self.runtime_pkg_list['obj_size'].append(obj_size)
+
+            # 对car_detection的结果，提取目标数量
+            # TODO：目标数量、目标大小、目标速度
+            if taskname == 'car_detection':
+                # 定义运行时情境字段
+                if 'obj_n' not in self.runtime_pkg_list:
+                    self.runtime_pkg_list['obj_n'] = list()
+
+                # 更新各字段序列（防止爆内存）
+                if len(self.runtime_pkg_list['obj_n']) > Query.CONTENT_ELE_MAXN:
+                    del self.runtime_pkg_list['obj_n'][0]
+                self.runtime_pkg_list['obj_n'].append(
+                    sum(list(runtime_info[taskname]['count_result'].values()))
+                )
+
+        for service_name in runtime_info:
+            if service_name == 'end_pipe':
+                continue
+
+            if service_name not in self.runtime_info_list:
+                self.runtime_info_list[service_name] = list()
+
+            # 保存用户的任务约束（任务约束针对整个任务而不是某个服务）
+            if service_name == 'user_constraint':
+                self.runtime_info_list[service_name].append(runtime_info[service_name])
+            # 保存每一个服务的资源情境、工况情境、任务可配置参数
+            else:
+                temp_runtime_dict = dict()
+                # 保存服务的资源情境
+                temp_runtime_dict['resource_runtime'] = runtime_info[service_name]['proc_resource_info']
+                # 保存服务的任务可配置参数
+                temp_runtime_dict['task_conf'] = runtime_info[service_name]['task_conf']
+                # 保存服务的工况情境
+                temp_runtime_dict['work_runtime'] = dict()
+                if service_name == 'face_detection':
+                    temp_runtime_dict['work_runtime']['obj_n'] = len(runtime_info[service_name]['faces'])
+                if service_name == 'face_alignment':
+                    temp_runtime_dict['work_runtime']['obj_n'] = runtime_info[service_name]['count_result']['total']
+                if service_name == 'car_detection':
+                    temp_runtime_dict['work_runtime']['obj_n'] = sum(
+                        list(runtime_info[service_name]['count_result'].values()))
+                self.runtime_info_list[service_name].append(temp_runtime_dict)
+            # 避免保存过多的内容导致爆内存
+            if len(self.runtime_info_list[service_name]) > Query.CONTENT_ELE_MAXN:
+                del self.runtime_info_list[service_name][0]
+
+    def aggregate_runtime(self):
+        # TODO：聚合情境感知参数的时间序列，给出预估值/统计值
+        runtime_desc = dict()
+        for k, v in self.runtime_pkg_list.items():
+            runtime_desc[k] = sum(v) * 1.0 / len(v)
+
+        # 获取场景稳定性
+        if 'obj_n' in self.runtime_pkg_list.keys():
+            runtime_desc['obj_stable'] = True if np.std(self.runtime_pkg_list['obj_n']) < 0.3 else False
+
+        # 每次调用agg后清空
+        self.runtime_pkg_list = dict()
+
+        # 获取运行时情境画像+知识库所需参数
+        service_list = list(self.runtime_info_list.keys())
+        if len(service_list) == 0:  # service_list长度为0，说明任务还未完整地执行一次，尤其是第一次执行任务时时间很长
+            return runtime_desc
+        assert 'user_constraint' in service_list
+        service_list.remove('user_constraint')
+        runtime_desc['runtime_portrait'] = dict()  # key为任务名，value为列表
+
+        for service_name in service_list:
+            runtime_desc['runtime_portrait'][service_name] = list()
+
+        for i in range(len(self.runtime_info_list['user_constraint'])):
+            delay_constraint = self.runtime_info_list['user_constraint'][i]['delay']  # 用户的时延约束
+            delay_exec = 0  # 整个任务实际的执行时延
+            for service_name in service_list:
+                delay_exec += self.runtime_info_list[service_name][i]['resource_runtime']['all_latency']
+
+            for service_name in service_list:
+                cpu_util_use = self.runtime_info_list[service_name][i]['resource_runtime']['cpu_util_use']
+                cpu_util_limit = self.runtime_info_list[service_name][i]['resource_runtime']['cpu_util_limit']
+                mem_util_use = self.runtime_info_list[service_name][i]['resource_runtime']['mem_util_use']
+                mem_util_limit = self.runtime_info_list[service_name][i]['resource_runtime']['mem_util_limit']
+
+                if delay_exec <= delay_constraint:  # 任务执行的时延低于用户约束
+                    # 计算资源画像
+                    if cpu_util_limit - cpu_util_use >= 0.1:
+                        self.runtime_info_list[service_name][i]['resource_runtime'][
+                            'cpu_portrait'] = 0  # 0表示强，1表示中，2表示弱
+                    elif math.fabs(cpu_util_limit - cpu_util_use) < 0.1:
+                        self.runtime_info_list[service_name][i]['resource_runtime']['cpu_portrait'] = 1
+                    else:
+                        root_logger.warning("Compute resource limit is useless, cpu_util_limit:{}, cpu_util_use{}!"
+                                            .format(cpu_util_limit, cpu_util_use))
+                        self.runtime_info_list[service_name][i]['resource_runtime']['cpu_portrait'] = 1
+
+                    # 存储资源画像
+                    if mem_util_limit - mem_util_use >= 0.1:
+                        self.runtime_info_list[service_name][i]['resource_runtime']['mem_portrait'] = 0
+                    elif math.fabs(mem_util_limit - mem_util_use) < 0.1:
+                        self.runtime_info_list[service_name][i]['resource_runtime']['mem_portrait'] = 1
+                    else:
+                        root_logger.warning("Memory resource limit is useless, mem_util_limit:{}, mem_util_use{}!"
+                                            .format(mem_util_limit, mem_util_use))
+                        self.runtime_info_list[service_name][i]['resource_runtime']['mem_portrait'] = 1
+
+                else:  # 任务执行的时延高于用户约束
+                    if cpu_util_limit - cpu_util_use >= 0.1:
+                        self.runtime_info_list[service_name][i]['resource_runtime']['cpu_portrait'] = 0
+                    elif math.fabs(cpu_util_limit - cpu_util_use) < 0.1:
+                        self.runtime_info_list[service_name][i]['resource_runtime']['cpu_portrait'] = 2
+                    else:
+                        root_logger.warning("Compute resource limit is useless, cpu_util_limit:{}, cpu_util_use{}!"
+                                            .format(cpu_util_limit, cpu_util_use))
+                        self.runtime_info_list[service_name][i]['resource_runtime']['cpu_portrait'] = 2
+
+                    # 存储资源画像
+                    if mem_util_limit - mem_util_use >= 0.1:
+                        self.runtime_info_list[service_name][i]['resource_runtime']['mem_portrait'] = 0
+                    elif math.fabs(mem_util_limit - mem_util_use) < 0.1:
+                        self.runtime_info_list[service_name][i]['resource_runtime']['mem_portrait'] = 2
+                    else:
+                        root_logger.warning("Memory resource limit is useless, mem_util_limit:{}, mem_util_use{}!"
+                                            .format(mem_util_limit, mem_util_use))
+                        self.runtime_info_list[service_name][i]['resource_runtime']['mem_portrait'] = 2
+
+                runtime_desc['runtime_portrait'][service_name].append(self.runtime_info_list[service_name][i])
+
+        self.runtime_info_list = dict()  # 每次获取运行时情境之后清空
+
+        return runtime_desc
     
     def set_runtime(self, runtime_info):
         self.current_runtime = runtime_info
     
     def get_runtime(self):
+        new_runtime = self.aggregate_runtime()
+        assert isinstance(new_runtime, dict)
+        if new_runtime:  # 若new_runtime非空，则更新current_runtime；否则保持current_runtime
+            self.current_runtime = new_runtime
         return self.current_runtime
 
     def set_user_constraint(self, user_constraint):
@@ -141,6 +312,13 @@ class QueryManager():
         query = self.query_dict[query_id]
         assert isinstance(query, Query)
         query.update_result(new_result)
+
+    def sync_query_runtime(self, query_id, new_runtime):
+        assert query_id in self.query_dict
+
+        query = self.query_dict[query_id]
+        assert isinstance(query, Query)
+        query.update_runtime(new_runtime)
     
     def get_query_result(self, query_id):
         assert query_id in self.query_dict
@@ -252,6 +430,18 @@ def query_sync_result_cbk():
 
     return flask.jsonify({"status": 500})
 
+@query_app.route("/query/sync_runtime", methods=["POST"])
+@flask_cors.cross_origin()
+def query_sync_runtime_cbk():
+    para = flask.request.json
+
+    job_uid = para['job_uid']
+    job_runtime = para['job_runtime']
+
+    query_manager.sync_query_runtime(query_id=job_uid, new_runtime=job_runtime)
+
+    return flask.jsonify({"status": 500})
+
 @query_app.route("/query/get_result/<query_id>", methods=["GET"])
 @flask_cors.cross_origin()
 def query_get_result_cbk(query_id):
@@ -344,6 +534,8 @@ def cloud_scheduler_loop(query_manager=None):
                 user_constraint = query.user_constraint
                 assert node_addr
 
+                '''
+                # 旧版本的运行时情境获取方式：向边端job_manager发送请求，边端聚合之后发给云
                 # 获取当前query的运行时情境（query_id == job_uid
                 r = query_manager.sess.get(
                     url="http://{}/job/get_runtime/{}".format(node_addr, query_id)
@@ -352,6 +544,10 @@ def cloud_scheduler_loop(query_manager=None):
                 # 更新查询的运行时情境（以便用户从云端获取）
                 if runtime_info:
                     query.set_runtime(runtime_info=runtime_info)  # 每调度一次更新一次云端Query中的runtime
+                '''
+                # 新版本的运行时情境获取方式，直接从云端的query_manager或者query中获取
+                runtime_info = query.get_runtime()
+                root_logger.info("In cloud_scheduler_loop, runtime_info is {}".format(runtime_info))
 
                 # conf, flow_mapping = scheduler_func.pid_mogai_scheduler.scheduler(
                 # conf, flow_mapping = scheduler_func.pid_content_aware_scheduler.scheduler(

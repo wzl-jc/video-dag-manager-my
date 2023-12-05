@@ -232,6 +232,13 @@ class JobManager():
                                json={"job_uid": job_uid,
                                      "job_result": job_result})
 
+    # 将任务的运行时情境基础信息同步到query manager（本地不存放）
+    def sync_job_runtime(self, job_uid, job_runtime, report2qm=True):
+        if report2qm:
+            r = self.sess.post(url="http://{}/query/sync_runtime".format(self.query_addr),
+                               json={"job_uid": job_uid,
+                                     "job_runtime": job_runtime})
+
     def remove_job(self, job):
         # 根据job的id移除job
         del self.job_dict[job.get_job_uid()]
@@ -383,7 +390,7 @@ class Job():
                 output_ctx['task_conf'] = self.video_conf  # 将当前任务的可配置参数也报告给运行时情境
 
                 runtime_dict[taskname] = output_ctx
-                self.update_runtime(taskname=taskname, output_ctx=output_ctx)  # 将DAG每一步的结果都汇报给运行时情境并更新情境
+                # self.update_runtime(taskname=taskname, output_ctx=output_ctx)  # 将DAG每一步的结果都汇报给运行时情境并更新情境
 
             n += 1
 
@@ -392,12 +399,16 @@ class Job():
                 plan_result['delay'][taskname] = \
                     plan_result['delay'][taskname] / ((cam_frame_id - curr_cam_frame_id + 1) * 1.0)
                 total_frame_delay += plan_result['delay'][taskname]
-
-            self.update_runtime(taskname='end_pipe', output_ctx={"delay": total_frame_delay})  # 将DAG执行的总时延也作为情境汇报
+            runtime_dict['end_pipe'] = {
+                "delay": total_frame_delay,
+                "frame_id": cam_frame_id,
+                "n_loop": n
+            }
+            # self.update_runtime(taskname='end_pipe', output_ctx={"delay": total_frame_delay})  # 将DAG执行的总时延也作为情境汇报
 
             # DAG执行结束之后再次更新运行时情境，主要用于运行时情境画像，为知识库建立提供数据
             runtime_dict['user_constraint'] = self.user_constraint
-            self.update_runtime(taskname='runtime_portrait', output_ctx=runtime_dict)
+            # self.update_runtime(taskname='runtime_portrait', output_ctx=runtime_dict)
 
             output_ctx["frame_id"] = cam_frame_id
             output_ctx["n_loop"] = n
@@ -418,6 +429,9 @@ class Job():
                                             #        "plan_result": plan_result
                                                 }
                                             })
+
+            # 4、通过job manager同步运行时情境信息到query manager，本地不保存情境信息
+            self.manager.sync_job_runtime(job_uid=self.get_job_uid(), job_runtime=runtime_dict)
 
 
     def invoke_service(self, serv_url, taskname, input_ctx):
